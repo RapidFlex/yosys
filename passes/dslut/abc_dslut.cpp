@@ -31,7 +31,7 @@
 
 #define ABC_COMMAND_LIB "strash; &get -n; &fraig -x; &put; scorr; dc2; dretime; strash; &get -n; &dch -f; &nf {D}; &put"
 #define ABC_COMMAND_CTR "strash; &get -n; &fraig -x; &put; scorr; dc2; dretime; strash; &get -n; &dch -f; &nf {D}; &put; buffer; upsize {D}; dnsize {D}; stime -p"
-#define ABC_COMMAND_LUT "strash; &get -n; &fraig -x; &put; scorr; dc2; dretime; strash; dch -f; if -k /home/xfcao/dslut.dsd -K 8; mfs2"
+#define ABC_COMMAND_LUT "strash; &get -n; &fraig -x; &put; scorr; dc2; dretime; strash; dch -f; if; mfs2"
 #define ABC_COMMAND_SOP "strash; &get -n; &fraig -x; &put; scorr; dc2; dretime; strash; dch -f; cover {I} {P}"
 #define ABC_COMMAND_DFL "strash; &get -n; &fraig -x; &put; scorr; dc2; dretime; strash; &get -n; &dch -f; &nf {D}; &put"
 
@@ -703,11 +703,11 @@ struct abc_output_filter
 	}
 };
 
-void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::string script_file, std::string exe_file,
+void abc_module_dslut(RTLIL::Design *design, RTLIL::Module *current_module, std::string script_file, std::string exe_file,
 		std::vector<std::string> &liberty_files, std::vector<std::string> &genlib_files, std::string constr_file,
 		bool cleanup, vector<int> lut_costs, bool dff_mode, std::string clk_str, bool keepff, std::string delay_target,
 		std::string sop_inputs, std::string sop_products, std::string lutin_shared, bool fast_mode,
-		const std::vector<RTLIL::Cell*> &cells, bool show_tempdir, bool sop_mode, bool abc_dress, std::vector<std::string> &dont_use_cells)
+		const std::vector<RTLIL::Cell*> &cells, bool show_tempdir, bool sop_mode, bool abc_dress, std::vector<std::string> &dont_use_cells, std::string dsdlib)
 {
 	module = current_module;
 	map_autoidx = autoidx++;
@@ -835,9 +835,8 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 		for (int this_cost : lut_costs)
 			if (this_cost != lut_costs.front())
 				all_luts_cost_same = false;
-		abc_script += fast_mode ? ABC_FAST_COMMAND_LUT : ABC_COMMAND_LUT;
-		if (all_luts_cost_same && !fast_mode)
-			abc_script += "; lutpack {S}";
+		abc_script += fast_mode ? ABC_FAST_COMMAND_LUT : (dsdlib.empty()? ABC_COMMAND_LUT:"strash; &get -n; &fraig -x; &put; scorr; dc2; dretime; strash; dch -f; dsd_load "+dsdlib+"; if -k -K 8; mfs2");
+		
 	} else if (!liberty_files.empty() || !genlib_files.empty())
 		abc_script += constr_file.empty() ? (fast_mode ? ABC_FAST_COMMAND_LIB : ABC_COMMAND_LIB) : (fast_mode ? ABC_FAST_COMMAND_CTR : ABC_COMMAND_CTR);
 	else if (sop_mode)
@@ -1451,16 +1450,18 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 }
 
 struct AbcPass : public Pass {
-	AbcPass() : Pass("abc", "use ABC for technology mapping") { }
+	AbcPass() : Pass("abc_dslut", "use ABC for technology mapping") { }
 	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    abc [options] [selection]\n");
+		log("    abc_dslut [options] [selection]\n");
 		log("\n");
 		log("This pass uses the ABC tool [1] for technology mapping of yosys's internal gate\n");
 		log("library to a target architecture.\n");
 		log("\n");
+		log("    -dsdlib\n");		//added by cxf
+		log("        dsdlib used for dslut-oriented technology mapping\n");  //added by cxf
 		log("    -exe <command>\n");
 #ifdef ABCEXTERNAL
 		log("        use the specified command instead of \"" ABCEXTERNAL "\" to execute ABC.\n");
@@ -1486,7 +1487,7 @@ struct AbcPass : public Pass {
 		log("%s\n", fold_abc_cmd(ABC_COMMAND_CTR).c_str());
 		log("\n");
 		log("        for -lut/-luts (only one LUT size):\n");
-		log("%s\n", fold_abc_cmd(ABC_COMMAND_LUT "; lutpack {S}").c_str());
+		log("%s\n", fold_abc_cmd(ABC_COMMAND_LUT ).c_str());
 		log("\n");
 		log("        for -lut/-luts (different LUT sizes):\n");
 		log("%s\n", fold_abc_cmd(ABC_COMMAND_LUT).c_str());
@@ -1520,134 +1521,10 @@ struct AbcPass : public Pass {
 		log("        generate netlists for the specified cell library (using the liberty\n");
 		log("        file format).\n");
 		log("\n");
-		log("    -dont_use <cell_name>\n");
-		log("        generate netlists for the specified cell library (using the liberty\n");
-		log("        file format).\n");
-		log("\n");
-		log("    -genlib <file>\n");
-		log("        generate netlists for the specified cell library (using the SIS Genlib\n");
-		log("        file format).\n");
-		log("\n");
-		log("    -constr <file>\n");
-		log("        pass this file with timing constraints to ABC.\n");
-		log("        use with -liberty/-genlib.\n");
-		log("\n");
-		log("        a constr file contains two lines:\n");
-		log("            set_driving_cell <cell_name>\n");
-		log("            set_load <floating_point_number>\n");
-		log("\n");
-		log("        the set_driving_cell statement defines which cell type is assumed to\n");
-		log("        drive the primary inputs and the set_load statement sets the load in\n");
-		log("        femtofarads for each primary output.\n");
-		log("\n");
-		log("    -D <picoseconds>\n");
-		log("        set delay target. the string {D} in the default scripts above is\n");
-		log("        replaced by this option when used, and an empty string otherwise.\n");
-		log("        this also replaces 'dretime' with 'dretime; retime -o {D}' in the\n");
-		log("        default scripts above.\n");
-		log("\n");
-		log("    -I <num>\n");
-		log("        maximum number of SOP inputs.\n");
-		log("        (replaces {I} in the default scripts above)\n");
-		log("\n");
-		log("    -P <num>\n");
-		log("        maximum number of SOP products.\n");
-		log("        (replaces {P} in the default scripts above)\n");
-		log("\n");
-		log("    -S <num>\n");
-		log("        maximum number of LUT inputs shared.\n");
-		log("        (replaces {S} in the default scripts above, default: -S 1)\n");
-		log("\n");
-		log("    -lut <width>\n");
-		log("        generate netlist using luts of (max) the specified width.\n");
-		log("\n");
-		log("    -lut <w1>:<w2>\n");
-		log("        generate netlist using luts of (max) the specified width <w2>. All\n");
-		log("        luts with width <= <w1> have constant cost. for luts larger than <w1>\n");
-		log("        the area cost doubles with each additional input bit. the delay cost\n");
-		log("        is still constant for all lut widths.\n");
-		log("\n");
-		log("    -luts <cost1>,<cost2>,<cost3>,<sizeN>:<cost4-N>,..\n");
-		log("        generate netlist using luts. Use the specified costs for luts with 1,\n");
-		log("        2, 3, .. inputs.\n");
-		log("\n");
-		log("    -sop\n");
-		log("        map to sum-of-product cells and inverters\n");
-		log("\n");
-		// log("    -mux4, -mux8, -mux16\n");
-		// log("        try to extract 4-input, 8-input, and/or 16-input muxes\n");
-		// log("        (ignored when used with -liberty/-genlib or -lut)\n");
-		// log("\n");
-		log("    -g type1,type2,...\n");
-		log("        Map to the specified list of gate types. Supported gates types are:\n");
-		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
-		log("           AND, NAND, OR, NOR, XOR, XNOR, ANDNOT, ORNOT, MUX,\n");
-		log("           NMUX, AOI3, OAI3, AOI4, OAI4.\n");
-		log("        (The NOT gate is always added to this list automatically.)\n");
-		log("\n");
-		log("        The following aliases can be used to reference common sets of gate\n");
-		log("        types:\n");
-		log("          simple: AND OR XOR MUX\n");
-		log("          cmos2:  NAND NOR\n");
-		log("          cmos3:  NAND NOR AOI3 OAI3\n");
-		log("          cmos4:  NAND NOR AOI3 OAI3 AOI4 OAI4\n");
-		log("          cmos:   NAND NOR AOI3 OAI3 AOI4 OAI4 NMUX MUX XOR XNOR\n");
-		log("          gates:  AND NAND OR NOR XOR XNOR ANDNOT ORNOT\n");
-		log("          aig:    AND NAND OR NOR ANDNOT ORNOT\n");
-		log("\n");
-		log("        The alias 'all' represent the full set of all gate types.\n");
-		log("\n");
-		log("        Prefix a gate type with a '-' to remove it from the list. For example\n");
-		log("        the arguments 'AND,OR,XOR' and 'simple,-MUX' are equivalent.\n");
-		log("\n");
-		log("        The default is 'all,-NMUX,-AOI3,-OAI3,-AOI4,-OAI4'.\n");
-		log("\n");
-		log("    -dff\n");
-		log("        also pass $_DFF_?_ and $_DFFE_??_ cells through ABC. modules with many\n");
-		log("        clock domains are automatically partitioned in clock domains and each\n");
-		log("        domain is passed through ABC independently.\n");
-		log("\n");
-		log("    -clk [!]<clock-signal-name>[,[!]<enable-signal-name>]\n");
-		log("        use only the specified clock domain. this is like -dff, but only FF\n");
-		log("        cells that belong to the specified clock domain are used.\n");
-		log("\n");
-		log("    -keepff\n");
-		log("        set the \"keep\" attribute on flip-flop output wires. (and thus preserve\n");
-		log("        them, for example for equivalence checking.)\n");
-		log("\n");
-		log("    -nocleanup\n");
-		log("        when this option is used, the temporary files created by this pass\n");
-		log("        are not removed. this is useful for debugging.\n");
-		log("\n");
-		log("    -showtmp\n");
-		log("        print the temp dir name in log. usually this is suppressed so that the\n");
-		log("        command output is identical across runs.\n");
-		log("\n");
-		log("    -markgroups\n");
-		log("        set a 'abcgroup' attribute on all objects created by ABC. The value of\n");
-		log("        this attribute is a unique integer for each ABC process started. This\n");
-		log("        is useful for debugging the partitioning of clock domains.\n");
-		log("\n");
-		log("    -dress\n");
-		log("        run the 'dress' command after all other ABC commands. This aims to\n");
-		log("        preserve naming by an equivalence check between the original and\n");
-		log("        post-ABC netlists (experimental).\n");
-		log("\n");
-		log("When no target cell library is specified the Yosys standard cell library is\n");
-		log("loaded into ABC before the ABC script is executed.\n");
-		log("\n");
-		log("Note that this is a logic optimization pass within Yosys that is calling ABC\n");
-		log("internally. This is not going to \"run ABC on your design\". It will instead run\n");
-		log("ABC on logic snippets extracted from your design. You will not get any useful\n");
-		log("output when passing an ABC script that writes a file. Instead write your full\n");
-		log("design as BLIF file with write_blif and then load that into ABC externally if\n");
-		log("you want to use ABC to convert your design into another format.\n");
-		log("\n");
-		log("[1] http://www.eecs.berkeley.edu/~alanmi/abc/\n");
-		log("\n");
+	
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
-	{
+	{	
 		log_header(design, "Executing ABC pass (technology mapping using ABC).\n");
 		log_push();
 
@@ -1657,7 +1534,7 @@ struct AbcPass : public Pass {
 		initvals.clear();
 		pi_map.clear();
 		po_map.clear();
-
+		std::string dsdlib=""; //added by cxf
 		std::string exe_file = yosys_abc_executable;
 		std::string script_file, default_liberty_file, constr_file, clk_str;
 		std::vector<std::string> liberty_files, genlib_files, dont_use_cells;
@@ -1692,6 +1569,7 @@ struct AbcPass : public Pass {
 		if (design->scratchpad.count("abc.S")) {
 			lutin_shared = "-S " + design->scratchpad_get_string("abc.S");
 		}
+
 		lut_arg = design->scratchpad_get_string("abc.lut", lut_arg);
 		luts_arg = design->scratchpad_get_string("abc.luts", luts_arg);
 		sop_mode = design->scratchpad_get_bool("abc.sop", sop_mode);
@@ -1733,6 +1611,10 @@ struct AbcPass : public Pass {
 			std::string arg = args[argidx];
 			if (arg == "-exe" && argidx+1 < args.size()) {
 				exe_file = args[++argidx];
+				continue;
+			}
+			if (arg == "-dsdlib" && argidx+1 < args.size()) {  //added by cxf
+				dsdlib = args[++argidx];
 				continue;
 			}
 			if (arg == "-script" && argidx+1 < args.size()) {
@@ -1895,151 +1777,7 @@ struct AbcPass : public Pass {
 		}
 
 		// handle -g argument
-		if (!g_arg.empty()){
-			for (auto g : split_tokens(g_arg, ",")) {
-				vector<string> gate_list;
-				bool remove_gates = false;
-				if (GetSize(g) > 0 && g[0] == '-') {
-					remove_gates = true;
-					g = g.substr(1);
-				}
-				if (g == "AND") goto ok_gate;
-				if (g == "NAND") goto ok_gate;
-				if (g == "OR") goto ok_gate;
-				if (g == "NOR") goto ok_gate;
-				if (g == "XOR") goto ok_gate;
-				if (g == "XNOR") goto ok_gate;
-				if (g == "ANDNOT") goto ok_gate;
-				if (g == "ORNOT") goto ok_gate;
-				if (g == "MUX") goto ok_gate;
-				if (g == "NMUX") goto ok_gate;
-				if (g == "AOI3") goto ok_gate;
-				if (g == "OAI3") goto ok_gate;
-				if (g == "AOI4") goto ok_gate;
-				if (g == "OAI4") goto ok_gate;
-				if (g == "simple") {
-					gate_list.push_back("AND");
-					gate_list.push_back("OR");
-					gate_list.push_back("XOR");
-					gate_list.push_back("MUX");
-					goto ok_alias;
-				}
-				if (g == "cmos2") {
-					if (!remove_gates)
-						cmos_cost = true;
-					gate_list.push_back("NAND");
-					gate_list.push_back("NOR");
-					goto ok_alias;
-				}
-				if (g == "cmos3") {
-					if (!remove_gates)
-						cmos_cost = true;
-					gate_list.push_back("NAND");
-					gate_list.push_back("NOR");
-					gate_list.push_back("AOI3");
-					gate_list.push_back("OAI3");
-					goto ok_alias;
-				}
-				if (g == "cmos4") {
-					if (!remove_gates)
-						cmos_cost = true;
-					gate_list.push_back("NAND");
-					gate_list.push_back("NOR");
-					gate_list.push_back("AOI3");
-					gate_list.push_back("OAI3");
-					gate_list.push_back("AOI4");
-					gate_list.push_back("OAI4");
-					goto ok_alias;
-				}
-				if (g == "cmos") {
-					if (!remove_gates)
-						cmos_cost = true;
-					gate_list.push_back("NAND");
-					gate_list.push_back("NOR");
-					gate_list.push_back("AOI3");
-					gate_list.push_back("OAI3");
-					gate_list.push_back("AOI4");
-					gate_list.push_back("OAI4");
-					gate_list.push_back("NMUX");
-					gate_list.push_back("MUX");
-					gate_list.push_back("XOR");
-					gate_list.push_back("XNOR");
-					goto ok_alias;
-				}
-				if (g == "gates") {
-					gate_list.push_back("AND");
-					gate_list.push_back("NAND");
-					gate_list.push_back("OR");
-					gate_list.push_back("NOR");
-					gate_list.push_back("XOR");
-					gate_list.push_back("XNOR");
-					gate_list.push_back("ANDNOT");
-					gate_list.push_back("ORNOT");
-					goto ok_alias;
-				}
-				if (g == "aig") {
-					gate_list.push_back("AND");
-					gate_list.push_back("NAND");
-					gate_list.push_back("OR");
-					gate_list.push_back("NOR");
-					gate_list.push_back("ANDNOT");
-					gate_list.push_back("ORNOT");
-					goto ok_alias;
-				}
-				if (g == "all") {
-					gate_list.push_back("AND");
-					gate_list.push_back("NAND");
-					gate_list.push_back("OR");
-					gate_list.push_back("NOR");
-					gate_list.push_back("XOR");
-					gate_list.push_back("XNOR");
-					gate_list.push_back("ANDNOT");
-					gate_list.push_back("ORNOT");
-					gate_list.push_back("AOI3");
-					gate_list.push_back("OAI3");
-					gate_list.push_back("AOI4");
-					gate_list.push_back("OAI4");
-					gate_list.push_back("MUX");
-					gate_list.push_back("NMUX");
-					goto ok_alias;
-				}
-				if (g_arg_from_cmd)
-					cmd_error(args, g_argidx, stringf("Unsupported gate type: %s", g.c_str()));
-				else
-					log_cmd_error("Unsupported gate type: %s", g.c_str());
-			ok_gate:
-				gate_list.push_back(g);
-			ok_alias:
-				for (auto gate : gate_list) {
-					if (remove_gates)
-						enabled_gates.erase(gate);
-					else
-						enabled_gates.insert(gate);
-				}
-			}
-		}
-
-		if (!lut_costs.empty() && !(liberty_files.empty() && genlib_files.empty()))
-			log_cmd_error("Got -lut and -liberty/-genlib! These two options are exclusive.\n");
-		if (!constr_file.empty() && (liberty_files.empty() && genlib_files.empty()))
-			log_cmd_error("Got -constr but no -liberty/-genlib!\n");
-
-		if (enabled_gates.empty()) {
-			enabled_gates.insert("AND");
-			enabled_gates.insert("NAND");
-			enabled_gates.insert("OR");
-			enabled_gates.insert("NOR");
-			enabled_gates.insert("XOR");
-			enabled_gates.insert("XNOR");
-			enabled_gates.insert("ANDNOT");
-			enabled_gates.insert("ORNOT");
-			// enabled_gates.insert("AOI3");
-			// enabled_gates.insert("OAI3");
-			// enabled_gates.insert("AOI4");
-			// enabled_gates.insert("OAI4");
-			enabled_gates.insert("MUX");
-			// enabled_gates.insert("NMUX");
-		}
+		
 
 		for (auto mod : design->selected_modules())
 		{
@@ -2052,8 +1790,8 @@ struct AbcPass : public Pass {
 			initvals.set(&assign_map, mod);
 
 			if (!dff_mode || !clk_str.empty()) {
-				abc_module(design, mod, script_file, exe_file, liberty_files, genlib_files, constr_file, cleanup, lut_costs, dff_mode, clk_str, keepff,
-						delay_target, sop_inputs, sop_products, lutin_shared, fast_mode, mod->selected_cells(), show_tempdir, sop_mode, abc_dress, dont_use_cells);
+				abc_module_dslut(design, mod, script_file, exe_file, liberty_files, genlib_files, constr_file, cleanup, lut_costs, dff_mode, clk_str, keepff,
+						delay_target, sop_inputs, sop_products, lutin_shared, fast_mode, mod->selected_cells(), show_tempdir, sop_mode, abc_dress, dont_use_cells,dsdlib);
 				continue;
 			}
 
@@ -2214,8 +1952,8 @@ struct AbcPass : public Pass {
 				arst_sig = assign_map(std::get<5>(it.first));
 				srst_polarity = std::get<6>(it.first);
 				srst_sig = assign_map(std::get<7>(it.first));
-				abc_module(design, mod, script_file, exe_file, liberty_files, genlib_files, constr_file, cleanup, lut_costs, !clk_sig.empty(), "$",
-						keepff, delay_target, sop_inputs, sop_products, lutin_shared, fast_mode, it.second, show_tempdir, sop_mode, abc_dress, dont_use_cells);
+				abc_module_dslut(design, mod, script_file, exe_file, liberty_files, genlib_files, constr_file, cleanup, lut_costs, !clk_sig.empty(), "$",
+						keepff, delay_target, sop_inputs, sop_products, lutin_shared, fast_mode, it.second, show_tempdir, sop_mode, abc_dress, dont_use_cells,dsdlib);
 				assign_map.set(mod);
 			}
 		}
