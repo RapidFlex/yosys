@@ -586,7 +586,7 @@ void log_flush()
 }
 
 void log_dump_val_worker(RTLIL::IdString v) {
-	log("%s", log_id(v));
+	log("%s", v.unescape());
 }
 
 void log_dump_val_worker(RTLIL::SigSpec v) {
@@ -614,7 +614,7 @@ std::string log_const(const RTLIL::Const &value, bool autoint)
 
 const char *log_id(const RTLIL::IdString &str)
 {
-	std::string unescaped = RTLIL::unescape_id(str);
+	std::string unescaped = str.unescape();
 	log_id_cache.push_back(strdup(unescaped.c_str()));
 	return log_id_cache.back();
 }

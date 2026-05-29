@@ -200,6 +200,29 @@ struct OptMuxtreeWorker
 				root_muxes.at(driving_mux) = true;
 	}
 
+	struct knowledge_t
+	{
+		// Known inactive signals
+		// The payload is a reference counter used to manage the list
+		// When it is non-zero, the signal in known to be inactive
+		// When it reaches zero, the map element is removed
+		std::vector<int> known_inactive;
+
+		// database of known active signals
+		std::vector<int> known_active;
+
+		// this is just used to keep track of visited muxes in order to prohibit
+		// endless recursion in mux loops
+		std::vector<bool> visited_muxes;
+
+		// Initialize with the maximum possible sizes
+		knowledge_t(int num_bits, int num_muxes) {
+			known_inactive.assign(num_bits, 0);
+			known_active.assign(num_bits, 0);
+			visited_muxes.assign(num_muxes, false);
+		}
+	};
+
 	OptMuxtreeWorker(RTLIL::Design *design, RTLIL::Module *module) :
 			design(design), module(module), assign_map(module), removed_count(0)
 	{
@@ -227,11 +250,13 @@ struct OptMuxtreeWorker
 
 		populate_roots();
 
+		knowledge_t shared_knowledge(GetSize(bit2info), GetSize(mux2info));
+
 		for (int mux_idx = 0; mux_idx < GetSize(root_muxes); mux_idx++)
 			if (root_muxes.at(mux_idx)) {
-				log_debug("    Root of a mux tree: %s%s\n", log_id(mux2info[mux_idx].cell), root_enable_muxes.at(mux_idx) ? " (pure)" : "");
+				log_debug("    Root of a mux tree: %s%s\n", mux2info[mux_idx].cell, root_enable_muxes.at(mux_idx) ? " (pure)" : "");
 				root_mux_rerun.erase(mux_idx);
-				eval_root_mux(mux_idx);
+				eval_root_mux(shared_knowledge, mux_idx);
 				if (glob_evals_left == 0) {
 					log("  Giving up (too many iterations)\n");
 					return;
@@ -240,10 +265,10 @@ struct OptMuxtreeWorker
 
 		while (!root_mux_rerun.empty()) {
 			int mux_idx = *root_mux_rerun.begin();
-			log_debug("    Root of a mux tree: %s (rerun as non-pure)\n", log_id(mux2info[mux_idx].cell));
+			log_debug("    Root of a mux tree: %s (rerun as non-pure)\n", mux2info[mux_idx].cell);
 			log_assert(root_enable_muxes.at(mux_idx));
 			root_mux_rerun.erase(mux_idx);
-			eval_root_mux(mux_idx);
+			eval_root_mux(shared_knowledge, mux_idx);
 			if (glob_evals_left == 0) {
 				log("  Giving up (too many iterations)\n");
 				return;
@@ -334,29 +359,6 @@ struct OptMuxtreeWorker
 		return results;
 	}
 
-	struct knowledge_t
-	{
-		// Known inactive signals
-		// The payload is a reference counter used to manage the list
-		// When it is non-zero, the signal in known to be inactive
-		// When it reaches zero, the map element is removed
-		std::vector<int> known_inactive;
-
-		// database of known active signals
-		std::vector<int> known_active;
-
-		// this is just used to keep track of visited muxes in order to prohibit
-		// endless recursion in mux loops
-		std::vector<bool> visited_muxes;
-
-		// Initialize with the maximum possible sizes
-		knowledge_t(int num_bits, int num_muxes) {
-			known_inactive.assign(num_bits, 0);
-			known_active.assign(num_bits, 0);
-			visited_muxes.assign(num_muxes, false);
-		}
-	};
-
 	static void activate_port(knowledge_t &knowledge, int port_idx, const muxinfo_t &muxinfo) {
 		// First, mark all other ports inactive
 		for (int i = 0; i < GetSize(muxinfo.ports); i++) {
@@ -437,7 +439,7 @@ struct OptMuxtreeWorker
 					// Ran out of subtree depth, re-eval this input tree in the next re-run
 					root_mux_rerun.insert(m);
 					root_enable_muxes.at(m) = true;
-					log_debug("      Removing pure flag from root mux %s.\n", log_id(mux2info[m].cell));
+					log_debug("      Removing pure flag from root mux %s.\n", mux2info[m].cell);
 				} else {
 					auto new_limits = limits.subtree();
 					// Since our knowledge includes assumption,
@@ -517,8 +519,8 @@ struct OptMuxtreeWorker
 		}
 
 		if (did_something) {
-			log("      Replacing known input bits on port %s of cell %s: %s -> %s\n", log_id(portname),
-					log_id(muxinfo.cell), log_signal(muxinfo.cell->getPort(portname)), log_signal(sig));
+			log("      Replacing known input bits on port %s of cell %s: %s -> %s\n", portname.unescape(),
+					muxinfo.cell, log_signal(muxinfo.cell->getPort(portname)), log_signal(sig));
 			muxinfo.cell->setPort(portname, sig);
 		}
 	}
@@ -530,7 +532,7 @@ struct OptMuxtreeWorker
 		glob_evals_left--;
 
 		muxinfo_t &muxinfo = mux2info[mux_idx];
-		log_debug("\t\teval %s (replace %d enable %d)\n", log_id(muxinfo.cell), limits.do_replace_known, limits.do_mark_ports_observable);
+		log_debug("\t\teval %s (replace %d enable %d)\n", muxinfo.cell, limits.do_replace_known, limits.do_mark_ports_observable);
 
 		// set input ports to constants if we find known active or inactive signals
 		if (limits.do_replace_known) {
@@ -579,14 +581,14 @@ struct OptMuxtreeWorker
 		}
 	}
 
-	void eval_root_mux(int mux_idx)
+	void eval_root_mux(knowledge_t &knowledge, int mux_idx)
 	{
 		log_assert(glob_evals_left > 0);
-		knowledge_t knowledge(GetSize(bit2info), GetSize(mux2info));
 		knowledge.visited_muxes[mux_idx] = true;
 		limits_t limits = {};
 		limits.do_mark_ports_observable = root_enable_muxes.at(mux_idx);
 		eval_mux(knowledge, mux_idx, limits);
+		knowledge.visited_muxes[mux_idx] = false;
 	}
 };
 

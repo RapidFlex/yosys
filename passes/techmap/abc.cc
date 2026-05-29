@@ -1565,7 +1565,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, RTLIL::Design *design, RTLIL
 	{
 		if (builtin_lib)
 		{
-			cell_stats[RTLIL::unescape_id(c->type)]++;
+			cell_stats[c->type.unescape()]++;
 			if (c->type.in(ID(ZERO), ID(ONE))) {
 				RTLIL::SigSig conn;
 				RTLIL::IdString name_y = remap_name(c->getPort(ID::Y).as_wire()->name);
@@ -1706,7 +1706,7 @@ void AbcModuleState::extract(AbcSigMap &assign_map, RTLIL::Design *design, RTLIL
 			}
 		}
 		else
-			cell_stats[RTLIL::unescape_id(c->type)]++;
+			cell_stats[c->type.unescape()]++;
 
 		if (c->type.in(ID(_const0_), ID(_const1_))) {
 			RTLIL::SigSig conn;
@@ -1935,8 +1935,10 @@ struct AbcPass : public Pass {
 		log("        file format).\n");
 		log("\n");
 		log("    -dont_use <cell_name>\n");
-		log("        generate netlists for the specified cell library (using the liberty\n");
-		log("        file format).\n");
+		log("        avoid usage of the technology cell <cell_name> when mapping the design.\n");
+		log("        this option can be used multiple times with different cell names and\n");
+		log("        supports simple glob patterns in the cell name.\n");
+		log("        only supported with Liberty cell libraries.\n");
 		log("\n");
 		log("    -genlib <file>\n");
 		log("        generate netlists for the specified cell library (using the SIS Genlib\n");
@@ -2447,7 +2449,7 @@ struct AbcPass : public Pass {
 		for (auto mod : design->selected_modules())
 		{
 			if (mod->processes.size() > 0) {
-				log("Skipping module %s as it contains processes.\n", log_id(mod));
+				log("Skipping module %s as it contains processes.\n", mod);
 				continue;
 			}
 
